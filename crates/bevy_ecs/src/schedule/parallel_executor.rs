@@ -55,11 +55,54 @@ impl ParallelExecutor {
             self.stages
                 .resize_with(schedule.stage_order.len(), ExecutorStage::default);
         }
-        for (stage_name, executor_stage) in schedule.stage_order.iter().zip(self.stages.iter_mut())
-        {
-            log::trace!("run stage {:?}", stage_name);
-            if let Some(stage_systems) = schedule.stages.get_mut(stage_name) {
-                executor_stage.run(world, resources, stage_systems, schedule_changed);
+        // for (stage_name, executor_stage) in schedule.stage_order.iter().zip(self.stages.iter_mut())
+        // {
+        //     log::trace!("run stage {:?}", stage_name);
+        //     if let Some(stage_systems) = schedule.stages.get_mut(stage_name) {
+        //         executor_stage.run(world, resources, stage_systems, schedule_changed);
+        //     }
+        // }
+
+        let mut index = 0;
+        let stage_count = self.stages.len();
+
+        loop {
+            if index >= stage_count {
+                break;
+            }
+
+            let executor_stage = &mut self.stages[index];
+            let stage_name = &schedule.stage_order[index];
+            let stage_systems = schedule
+                .stages
+                .get_mut(stage_name)
+                .expect("No schedule for system found");
+
+            if stage_name == "before_physics" && {
+                let tick = resources
+                    .get::<Tick>()
+                    .expect("Tick has to be added as resource.");
+                tick.target == tick.cur
+            } {
+                index += 3;
+                continue;
+            }
+
+            executor_stage.run(world, resources, stage_systems, schedule_changed);
+
+            if stage_name == "after_physics" {
+                // repeat before_physics, update and after_physics stages
+                let mut t = resources
+                    .get_mut::<Tick>()
+                    .expect("Tick has to be added as resource.");
+                t.cur += 1;
+                if t.cur == t.target {
+                    index += 1;
+                } else {
+                    index -= 2;
+                }
+            } else {
+                index += 1;
             }
         }
 
@@ -95,6 +138,25 @@ impl ParallelExecutor {
 }
 
 #[derive(Debug, Clone)]
+pub struct Tick {
+    pub cur: usize,
+    pub target: usize,
+    pub surplus: f32,
+    pub running: bool,
+}
+
+impl Tick {
+    pub fn new() -> Self {
+        Self {
+            cur: 0,
+            target: 0,
+            surplus: 0.,
+            running: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutorStage {
     /// each system's set of dependencies
     system_dependencies: Vec<FixedBitSet>,
@@ -122,7 +184,7 @@ impl Default for ExecutorStage {
             ready_events_of_dependents: Default::default(),
             system_dependencies: Default::default(),
             thread_local_system_indices: Default::default(),
-            last_archetypes_generation: ArchetypesGeneration(u64::MAX), // MAX forces prepare to run the first time
+            last_archetypes_generation: ArchetypesGeneration(u64::MAX), /* MAX forces prepare to run the first time */
         }
     }
 }
@@ -420,10 +482,14 @@ impl ExecutorStage {
         let start_archetypes_generation = world.archetypes_generation();
         let compute_pool = resources.get_cloned::<ComputeTaskPool>().unwrap();
 
+        // copy from above, force recalc
+        let archetypes_generation_changed =
+            self.last_archetypes_generation != world.archetypes_generation();
+
         // if the schedule has changed, clear executor state / fill it with new defaults
         // This is mostly zeroing out a bunch of arrays parallel to the systems array. They will get
         // repopulated by prepare_to_next_thread_local() calls
-        if schedule_changed {
+        if schedule_changed || archetypes_generation_changed {
             self.system_dependencies.clear();
             self.system_dependencies
                 .resize_with(systems.len(), || FixedBitSet::with_capacity(systems.len()));
