@@ -1,20 +1,19 @@
 mod query_set;
-
 pub use query_set::*;
 
-use bevy_hecs::{
+use crate::{
     ArchetypeComponent, Batch, BatchedIter, Component, ComponentError, Entity, Fetch, Mut,
-    Query as HecsQuery, QueryIter, ReadOnlyFetch, TypeAccess, World,
+    QueryFilter, QueryIter, ReadOnlyFetch, TypeAccess, World, WorldQuery,
 };
 use bevy_tasks::ParallelIterator;
 use std::marker::PhantomData;
 
 /// Provides scoped access to a World according to a given [HecsQuery]
 #[derive(Debug)]
-pub struct Query<'a, Q: HecsQuery> {
+pub struct Query<'a, Q: WorldQuery, F: QueryFilter = ()> {
     pub(crate) world: &'a World,
     pub(crate) component_access: &'a TypeAccess<ArchetypeComponent>,
-    _marker: PhantomData<Q>,
+    _marker: PhantomData<(Q, F)>,
 }
 
 /// An error that occurs when using a [Query]
@@ -26,9 +25,15 @@ pub enum QueryError {
     NoSuchEntity,
 }
 
-impl<'a, Q: HecsQuery> Query<'a, Q> {
+impl<'a, Q: WorldQuery, F: QueryFilter> Query<'a, Q, F> {
+    /// # Safety
+    /// This will create a Query that could violate memory safety rules. Make sure that this is only called in
+    /// ways that ensure the Queries have unique mutable access.
     #[inline]
-    pub fn new(world: &'a World, component_access: &'a TypeAccess<ArchetypeComponent>) -> Self {
+    pub(crate) unsafe fn new(
+        world: &'a World,
+        component_access: &'a TypeAccess<ArchetypeComponent>,
+    ) -> Self {
         Self {
             world,
             component_access,
@@ -37,7 +42,8 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
     }
 
     /// Iterates over the query results. This can only be called for read-only queries
-    pub fn iter(&self) -> QueryIter<'_, Q>
+    #[inline]
+    pub fn iter(&self) -> QueryIter<'_, Q, F>
     where
         Q::Fetch: ReadOnlyFetch,
     {
@@ -46,7 +52,8 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
     }
 
     /// Iterates over the query results
-    pub fn iter_mut(&mut self) -> QueryIter<'_, Q> {
+    #[inline]
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q, F> {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime borrow checks when they conflict
         unsafe { self.world.query_unchecked() }
     }
@@ -54,13 +61,14 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
     /// Iterates over the query results
     /// # Safety
     /// This allows aliased mutability. You must make sure this call does not result in multiple mutable references to the same component
-    pub unsafe fn iter_unsafe(&self) -> QueryIter<'_, Q> {
+    #[inline]
+    pub unsafe fn iter_unsafe(&self) -> QueryIter<'_, Q, F> {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime borrow checks when they conflict
         self.world.query_unchecked()
     }
 
     #[inline]
-    pub fn par_iter(&self, batch_size: usize) -> ParIter<'_, Q>
+    pub fn par_iter(&self, batch_size: usize) -> ParIter<'_, Q, F>
     where
         Q::Fetch: ReadOnlyFetch,
     {
@@ -69,12 +77,13 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
     }
 
     #[inline]
-    pub fn par_iter_mut(&mut self, batch_size: usize) -> ParIter<'_, Q> {
+    pub fn par_iter_mut(&mut self, batch_size: usize) -> ParIter<'_, Q, F> {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime borrow checks when they conflict
         unsafe { ParIter::new(self.world.query_batched_unchecked(batch_size)) }
     }
 
     /// Gets the query result for the given `entity`
+    #[inline]
     pub fn get(&self, entity: Entity) -> Result<<Q::Fetch as Fetch>::Item, QueryError>
     where
         Q::Fetch: ReadOnlyFetch,
@@ -82,17 +91,18 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime borrow checks when they conflict
         unsafe {
             self.world
-                .query_one_unchecked::<Q>(entity)
+                .query_one_unchecked::<Q, F>(entity)
                 .map_err(|_err| QueryError::NoSuchEntity)
         }
     }
 
     /// Gets the query result for the given `entity`
+    #[inline]
     pub fn get_mut(&mut self, entity: Entity) -> Result<<Q::Fetch as Fetch>::Item, QueryError> {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime borrow checks when they conflict
         unsafe {
             self.world
-                .query_one_unchecked::<Q>(entity)
+                .query_one_unchecked::<Q, F>(entity)
                 .map_err(|_err| QueryError::NoSuchEntity)
         }
     }
@@ -100,12 +110,13 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
     /// Gets the query result for the given `entity`
     /// # Safety
     /// This allows aliased mutability. You must make sure this call does not result in multiple mutable references to the same component
+    #[inline]
     pub unsafe fn get_unsafe(
         &self,
         entity: Entity,
     ) -> Result<<Q::Fetch as Fetch>::Item, QueryError> {
         self.world
-            .query_one_unchecked::<Q>(entity)
+            .query_one_unchecked::<Q, F>(entity)
             .map_err(|_err| QueryError::NoSuchEntity)
     }
 
@@ -170,6 +181,21 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
             .map_err(QueryError::ComponentError)
     }
 
+    /// Returns an array containing the `Entity`s in this `Query` that had the given `Component`
+    /// removed in this update.
+    ///
+    /// `removed::<C>()` only returns entities whose components were removed before the
+    /// current system started.
+    ///
+    /// Regular systems do not apply `Commands` until the end of their stage. This means component
+    /// removals in a regular system won't be accessible through `removed::<C>()` in the same
+    /// stage, because the removal hasn't actually occurred yet. This can be solved by executing
+    /// `removed::<C>()` in a later stage. `AppBuilder::add_system_to_stage()` can be used to
+    /// control at what stage a system runs.
+    ///
+    /// Thread local systems manipulate the world directly, so removes are applied immediately. This
+    /// means any system that runs after a thread local system in the same update will pick up
+    /// removals that happened in the thread local system, regardless of stages.
     pub fn removed<C: Component>(&self) -> &[Entity] {
         self.world.removed::<C>()
     }
@@ -184,23 +210,23 @@ impl<'a, Q: HecsQuery> Query<'a, Q> {
 }
 
 /// Parallel version of QueryIter
-pub struct ParIter<'w, Q: HecsQuery> {
-    batched_iter: BatchedIter<'w, Q>,
+pub struct ParIter<'w, Q: WorldQuery, F: QueryFilter> {
+    batched_iter: BatchedIter<'w, Q, F>,
 }
 
-impl<'w, Q: HecsQuery> ParIter<'w, Q> {
-    pub fn new(batched_iter: BatchedIter<'w, Q>) -> Self {
+impl<'w, Q: WorldQuery, F: QueryFilter> ParIter<'w, Q, F> {
+    pub fn new(batched_iter: BatchedIter<'w, Q, F>) -> Self {
         Self { batched_iter }
     }
 }
 
-unsafe impl<'w, Q: HecsQuery> Send for ParIter<'w, Q> {}
+unsafe impl<'w, Q: WorldQuery, F: QueryFilter> Send for ParIter<'w, Q, F> {}
 
-impl<'w, Q: HecsQuery> ParallelIterator<Batch<'w, Q>> for ParIter<'w, Q> {
+impl<'w, Q: WorldQuery, F: QueryFilter> ParallelIterator<Batch<'w, Q, F>> for ParIter<'w, Q, F> {
     type Item = <Q::Fetch as Fetch<'w>>::Item;
 
     #[inline]
-    fn next_batch(&mut self) -> Option<Batch<'w, Q>> {
+    fn next_batch(&mut self) -> Option<Batch<'w, Q, F>> {
         self.batched_iter.next()
     }
 }

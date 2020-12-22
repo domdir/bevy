@@ -29,15 +29,13 @@ impl FromResources for ButtonMaterials {
 
 fn button_system(
     button_materials: Res<ButtonMaterials>,
-    mut interaction_query: Query<(
-        &Button,
-        Mutated<Interaction>,
-        &mut Handle<ColorMaterial>,
-        &Children,
-    )>,
+    mut interaction_query: Query<
+        (&Interaction, &mut Handle<ColorMaterial>, &Children),
+        (Mutated<Interaction>, With<Button>),
+    >,
     mut text_query: Query<&mut Text>,
 ) {
-    for (_button, interaction, mut material, children) in interaction_query.iter_mut() {
+    for (interaction, mut material, children) in interaction_query.iter_mut() {
         let mut text = text_query.get_mut(children[0]).unwrap();
         match *interaction {
             Interaction::Clicked => {
@@ -57,14 +55,14 @@ fn button_system(
 }
 
 fn setup(
-    mut commands: Commands,
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     button_materials: Res<ButtonMaterials>,
 ) {
     commands
         // ui camera
-        .spawn(UiCameraComponents::default())
-        .spawn(ButtonComponents {
+        .spawn(CameraUiBundle::default())
+        .spawn(ButtonBundle {
             style: Style {
                 size: Size::new(Val::Px(150.0), Val::Px(65.0)),
                 // center button
@@ -79,13 +77,14 @@ fn setup(
             ..Default::default()
         })
         .with_children(|parent| {
-            parent.spawn(TextComponents {
+            parent.spawn(TextBundle {
                 text: Text {
                     value: "Button".to_string(),
                     font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                     style: TextStyle {
                         font_size: 40.0,
                         color: Color::rgb(0.9, 0.9, 0.9),
+                        ..Default::default()
                     },
                 },
                 ..Default::default()

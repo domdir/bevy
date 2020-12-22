@@ -4,7 +4,11 @@ use crate::{
     plugin::Plugin,
     stage, startup_stage, PluginGroup, PluginGroupBuilder,
 };
-use bevy_ecs::{FromResources, IntoQuerySystem, Resources, System, World};
+use bevy_ecs::{
+    clear_trackers_system, FromResources, IntoSystem, Resource, Resources, RunOnce, Schedule,
+    Stage, StateStage, System, SystemStage, World,
+};
+use bevy_utils::tracing::debug;
 
 /// Configure [App]s using the builder pattern
 pub struct AppBuilder {
@@ -17,8 +21,10 @@ impl Default for AppBuilder {
             app: App::default(),
         };
 
-        app_builder.add_default_stages();
-        app_builder.add_event::<AppExit>();
+        app_builder
+            .add_default_stages()
+            .add_event::<AppExit>()
+            .add_system_to_stage(stage::LAST, clear_trackers_system.system());
         app_builder
     }
 }
@@ -48,168 +54,155 @@ impl AppBuilder {
         self
     }
 
-    pub fn add_stage(&mut self, stage_name: &'static str) -> &mut Self {
-        self.app.schedule.add_stage(stage_name);
+    pub fn add_stage<S: Stage>(&mut self, name: &'static str, stage: S) -> &mut Self {
+        self.app.schedule.add_stage(name, stage);
         self
     }
 
-    pub fn add_stage_after(&mut self, target: &'static str, stage_name: &'static str) -> &mut Self {
-        self.app.schedule.add_stage_after(target, stage_name);
-        self
-    }
-
-    pub fn add_stage_before(
+    pub fn add_stage_after<S: Stage>(
         &mut self,
         target: &'static str,
-        stage_name: &'static str,
+        name: &'static str,
+        stage: S,
     ) -> &mut Self {
-        self.app.schedule.add_stage_before(target, stage_name);
+        self.app.schedule.add_stage_after(target, name, stage);
         self
     }
 
-    pub fn add_startup_stage(&mut self, stage_name: &'static str) -> &mut Self {
-        self.app.startup_schedule.add_stage(stage_name);
-        self
-    }
-
-    pub fn add_startup_stage_after(
+    pub fn add_stage_before<S: Stage>(
         &mut self,
         target: &'static str,
-        stage_name: &'static str,
+        name: &'static str,
+        stage: S,
     ) -> &mut Self {
-        self.app
-            .startup_schedule
-            .add_stage_after(target, stage_name);
+        self.app.schedule.add_stage_before(target, name, stage);
         self
     }
 
-    pub fn add_startup_stage_before(
+    pub fn add_startup_stage<S: Stage>(&mut self, name: &'static str, stage: S) -> &mut Self {
+        self.app
+            .schedule
+            .stage(stage::STARTUP, |schedule: &mut Schedule| {
+                schedule.add_stage(name, stage)
+            });
+        self
+    }
+
+    pub fn add_startup_stage_after<S: Stage>(
         &mut self,
         target: &'static str,
-        stage_name: &'static str,
-    ) -> &mut Self {
-        self.app
-            .startup_schedule
-            .add_stage_before(target, stage_name);
-        self
-    }
-
-    pub fn add_system(&mut self, system: Box<dyn System>) -> &mut Self {
-        self.add_system_to_stage(stage::UPDATE, system)
-    }
-
-    pub fn add_systems(&mut self, systems: Vec<Box<dyn System>>) -> &mut Self {
-        self.add_systems_to_stage(stage::UPDATE, systems)
-    }
-
-    pub fn init_system(
-        &mut self,
-        build: impl FnMut(&mut Resources) -> Box<dyn System>,
-    ) -> &mut Self {
-        self.init_system_to_stage(stage::UPDATE, build)
-    }
-
-    pub fn init_system_to_stage(
-        &mut self,
-        stage: &'static str,
-        mut build: impl FnMut(&mut Resources) -> Box<dyn System>,
-    ) -> &mut Self {
-        let system = build(&mut self.app.resources);
-        self.add_system_to_stage(stage, system)
-    }
-
-    pub fn add_startup_system_to_stage(
-        &mut self,
-        stage_name: &'static str,
-        system: Box<dyn System>,
-    ) -> &mut Self {
-        self.app
-            .startup_schedule
-            .add_system_to_stage(stage_name, system);
-        self
-    }
-
-    pub fn add_startup_systems_to_stage(
-        &mut self,
-        stage_name: &'static str,
-        systems: Vec<Box<dyn System>>,
-    ) -> &mut Self {
-        for system in systems {
-            self.app
-                .startup_schedule
-                .add_system_to_stage(stage_name, system);
-        }
-        self
-    }
-
-    pub fn add_startup_system(&mut self, system: Box<dyn System>) -> &mut Self {
-        self.app
-            .startup_schedule
-            .add_system_to_stage(startup_stage::STARTUP, system);
-        self
-    }
-
-    pub fn add_startup_systems(&mut self, systems: Vec<Box<dyn System>>) -> &mut Self {
-        self.add_startup_systems_to_stage(startup_stage::STARTUP, systems)
-    }
-
-    pub fn init_startup_system(
-        &mut self,
-        build: impl FnMut(&mut Resources) -> Box<dyn System>,
-    ) -> &mut Self {
-        self.init_startup_system_to_stage(startup_stage::STARTUP, build)
-    }
-
-    pub fn init_startup_system_to_stage(
-        &mut self,
-        stage: &'static str,
-        mut build: impl FnMut(&mut Resources) -> Box<dyn System>,
-    ) -> &mut Self {
-        let system = build(&mut self.app.resources);
-        self.add_startup_system_to_stage(stage, system)
-    }
-
-    pub fn add_default_stages(&mut self) -> &mut Self {
-        self.add_startup_stage(startup_stage::PRE_STARTUP)
-            .add_startup_stage(startup_stage::STARTUP)
-            .add_startup_stage(startup_stage::POST_STARTUP)
-            .add_stage(stage::FIRST)
-            .add_stage(stage::PRE_EVENT)
-            .add_stage(stage::EVENT)
-            .add_stage(stage::PRE_UPDATE)
-            .add_stage(stage::UPDATE)
-            .add_stage(stage::POST_UPDATE)
-            .add_stage(stage::LAST)
-    }
-
-    pub fn add_system_to_stage(
-        &mut self,
-        stage_name: &'static str,
-        system: Box<dyn System>,
-    ) -> &mut Self {
-        self.app.schedule.add_system_to_stage(stage_name, system);
-        self
-    }
-
-    pub fn add_system_to_stage_front(
-        &mut self,
-        stage_name: &'static str,
-        system: Box<dyn System>,
+        name: &'static str,
+        stage: S,
     ) -> &mut Self {
         self.app
             .schedule
-            .add_system_to_stage_front(stage_name, system);
+            .stage(stage::STARTUP, |schedule: &mut Schedule| {
+                schedule.add_stage_after(target, name, stage)
+            });
         self
     }
 
-    pub fn add_systems_to_stage(
+    pub fn add_startup_stage_before<S: Stage>(
+        &mut self,
+        target: &'static str,
+        name: &'static str,
+        stage: S,
+    ) -> &mut Self {
+        self.app
+            .schedule
+            .stage(stage::STARTUP, |schedule: &mut Schedule| {
+                schedule.add_stage_before(target, name, stage)
+            });
+        self
+    }
+
+    pub fn stage<T: Stage, F: FnOnce(&mut T) -> &mut T>(
+        &mut self,
+        name: &str,
+        func: F,
+    ) -> &mut Self {
+        self.app.schedule.stage(name, func);
+        self
+    }
+
+    pub fn add_system<S: System<In = (), Out = ()>>(&mut self, system: S) -> &mut Self {
+        self.add_system_to_stage(stage::UPDATE, system)
+    }
+
+    pub fn on_state_enter<T: Clone + Resource, S: System<In = (), Out = ()>>(
+        &mut self,
+        stage: &str,
+        state: T,
+        system: S,
+    ) -> &mut Self {
+        self.stage(stage, |stage: &mut StateStage<T>| {
+            stage.on_state_enter(state, system)
+        })
+    }
+
+    pub fn on_state_update<T: Clone + Resource, S: System<In = (), Out = ()>>(
+        &mut self,
+        stage: &str,
+        state: T,
+        system: S,
+    ) -> &mut Self {
+        self.stage(stage, |stage: &mut StateStage<T>| {
+            stage.on_state_update(state, system)
+        })
+    }
+
+    pub fn on_state_exit<T: Clone + Resource, S: System<In = (), Out = ()>>(
+        &mut self,
+        stage: &str,
+        state: T,
+        system: S,
+    ) -> &mut Self {
+        self.stage(stage, |stage: &mut StateStage<T>| {
+            stage.on_state_exit(state, system)
+        })
+    }
+
+    pub fn add_startup_system_to_stage<S: System<In = (), Out = ()>>(
         &mut self,
         stage_name: &'static str,
-        systems: Vec<Box<dyn System>>,
+        system: S,
     ) -> &mut Self {
-        for system in systems {
-            self.app.schedule.add_system_to_stage(stage_name, system);
-        }
+        self.app
+            .schedule
+            .stage(stage::STARTUP, |schedule: &mut Schedule| {
+                schedule.add_system_to_stage(stage_name, system)
+            });
+        self
+    }
+
+    pub fn add_startup_system<S: System<In = (), Out = ()>>(&mut self, system: S) -> &mut Self {
+        self.add_startup_system_to_stage(startup_stage::STARTUP, system)
+    }
+
+    pub fn add_default_stages(&mut self) -> &mut Self {
+        self.add_stage(
+            stage::STARTUP,
+            Schedule::default()
+                .with_run_criteria(RunOnce::default())
+                .with_stage(startup_stage::PRE_STARTUP, SystemStage::parallel())
+                .with_stage(startup_stage::STARTUP, SystemStage::parallel())
+                .with_stage(startup_stage::POST_STARTUP, SystemStage::parallel()),
+        )
+        .add_stage(stage::FIRST, SystemStage::parallel())
+        .add_stage(stage::PRE_EVENT, SystemStage::parallel())
+        .add_stage(stage::EVENT, SystemStage::parallel())
+        .add_stage(stage::PRE_UPDATE, SystemStage::parallel())
+        .add_stage(stage::UPDATE, SystemStage::parallel())
+        .add_stage(stage::POST_UPDATE, SystemStage::parallel())
+        .add_stage(stage::LAST, SystemStage::parallel())
+    }
+
+    pub fn add_system_to_stage<S: System<In = (), Out = ()>>(
+        &mut self,
+        stage_name: &'static str,
+        system: S,
+    ) -> &mut Self {
+        self.app.schedule.add_system_to_stage(stage_name, system);
         self
     }
 
@@ -267,7 +260,7 @@ impl AppBuilder {
     where
         T: Plugin,
     {
-        log::debug!("added plugin: {}", plugin.name());
+        debug!("added plugin: {}", plugin.name());
         plugin.build(self);
         self
     }

@@ -9,16 +9,16 @@ fn main() {
 }
 
 fn setup(
-    mut commands: Commands,
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn(Camera2dComponents::default());
+    commands.spawn(Camera2dBundle::default());
     let texture = asset_server.load("branding/icon.png");
 
     // Spawn a root entity with no parent
     let parent = commands
-        .spawn(SpriteComponents {
+        .spawn(SpriteBundle {
             transform: Transform::from_scale(Vec3::splat(0.75)),
             material: materials.add(ColorMaterial {
                 color: Color::WHITE,
@@ -29,7 +29,7 @@ fn setup(
         // With that entity as a parent, run a lambda that spawns its children
         .with_children(|parent| {
             // parent is a ChildBuilder, which has a similar API to Commands
-            parent.spawn(SpriteComponents {
+            parent.spawn(SpriteBundle {
                 transform: Transform {
                     translation: Vec3::new(250.0, 0.0, 0.0),
                     scale: Vec3::splat(0.75),
@@ -50,7 +50,7 @@ fn setup(
     // which would be added automatically to parents with other methods.
     // Similarly, adding a Parent component will automatically add a Children component to the parent.
     commands
-        .spawn(SpriteComponents {
+        .spawn(SpriteBundle {
             transform: Transform {
                 translation: Vec3::new(-250.0, 0.0, 0.0),
                 scale: Vec3::splat(0.75),
@@ -68,7 +68,7 @@ fn setup(
     // Another way is to use the push_children function to add children after the parent
     // entity has already been spawned.
     let child = commands
-        .spawn(SpriteComponents {
+        .spawn(SpriteBundle {
             transform: Transform {
                 translation: Vec3::new(0.0, 250.0, 0.0),
                 scale: Vec3::splat(0.75),
@@ -89,35 +89,32 @@ fn setup(
 
 // A simple system to rotate the root entity, and rotate all its children separately
 fn rotate(
-    mut commands: Commands,
+    commands: &mut Commands,
     time: Res<Time>,
-    mut parents_query: Query<(Entity, &mut Children, &Sprite)>,
-    mut transform_query: Query<With<Sprite, &mut Transform>>,
+    mut parents_query: Query<(Entity, &Children), With<Sprite>>,
+    mut transform_query: Query<&mut Transform, With<Sprite>>,
 ) {
     let angle = std::f32::consts::PI / 2.0;
-    for (parent, mut children, _) in parents_query.iter_mut() {
+    for (parent, children) in parents_query.iter_mut() {
         if let Ok(mut transform) = transform_query.get_mut(parent) {
-            transform.rotate(Quat::from_rotation_z(-angle * time.delta_seconds));
+            transform.rotate(Quat::from_rotation_z(-angle * time.delta_seconds()));
         }
 
         // To iterate through the entities children, just treat the Children component as a Vec
         // Alternatively, you could query entities that have a Parent component
         for child in children.iter() {
             if let Ok(mut transform) = transform_query.get_mut(*child) {
-                transform.rotate(Quat::from_rotation_z(angle * 2.0 * time.delta_seconds));
+                transform.rotate(Quat::from_rotation_z(angle * 2.0 * time.delta_seconds()));
             }
         }
 
         // To demonstrate removing children, we'll start to remove the children after a couple of seconds
-        if time.seconds_since_startup >= 2.0 && children.len() == 3 {
-            // Using .despawn() on an entity does not remove it from its parent's list of children!
-            // It must be done manually if using .despawn()
-            // NOTE: This is a bug. Eventually Bevy will update the children list automatically
-            let child = children.pop().unwrap();
+        if time.seconds_since_startup() >= 2.0 && children.len() == 3 {
+            let child = children.last().copied().unwrap();
             commands.despawn(child);
         }
 
-        if time.seconds_since_startup >= 4.0 {
+        if time.seconds_since_startup() >= 4.0 {
             // This will remove the entity from its parent's list of children, as well as despawn
             // any children the entity has.
             commands.despawn_recursive(parent);

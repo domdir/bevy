@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bevy_asset::{AssetLoader, LoadContext, LoadedAsset};
-use bevy_type_registry::TypeUuid;
+use bevy_reflect::TypeUuid;
 use bevy_utils::BoxedFuture;
 use std::{io::Cursor, sync::Arc};
 
@@ -30,8 +30,7 @@ impl AssetLoader for Mp3Loader {
     }
 
     fn extensions(&self) -> &[&str] {
-        static EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg"];
-        EXTENSIONS
+        &["mp3", "flac", "wav", "ogg"]
     }
 }
 

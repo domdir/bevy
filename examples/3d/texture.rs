@@ -10,7 +10,7 @@ fn main() {
 
 /// sets up a scene with textured entities
 fn setup(
-    mut commands: Commands,
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -50,7 +50,7 @@ fn setup(
     // add entities to the world
     commands
         // textured quad - normal
-        .spawn(PbrComponents {
+        .spawn(PbrBundle {
             mesh: quad_handle.clone(),
             material: material_handle,
             transform: Transform {
@@ -58,14 +58,14 @@ fn setup(
                 rotation: Quat::from_rotation_x(-std::f32::consts::PI / 5.0),
                 ..Default::default()
             },
-            draw: Draw {
+            visible: Visible {
                 is_transparent: true,
                 ..Default::default()
             },
             ..Default::default()
         })
         // textured quad - modulated
-        .spawn(PbrComponents {
+        .spawn(PbrBundle {
             mesh: quad_handle.clone(),
             material: red_material_handle,
             transform: Transform {
@@ -73,14 +73,14 @@ fn setup(
                 rotation: Quat::from_rotation_x(-std::f32::consts::PI / 5.0),
                 ..Default::default()
             },
-            draw: Draw {
+            visible: Visible {
                 is_transparent: true,
                 ..Default::default()
             },
             ..Default::default()
         })
         // textured quad - modulated
-        .spawn(PbrComponents {
+        .spawn(PbrBundle {
             mesh: quad_handle,
             material: blue_material_handle,
             transform: Transform {
@@ -88,14 +88,14 @@ fn setup(
                 rotation: Quat::from_rotation_x(-std::f32::consts::PI / 5.0),
                 ..Default::default()
             },
-            draw: Draw {
+            visible: Visible {
                 is_transparent: true,
                 ..Default::default()
             },
             ..Default::default()
         })
         // camera
-        .spawn(Camera3dComponents {
+        .spawn(Camera3dBundle {
             transform: Transform::from_translation(Vec3::new(3.0, 5.0, 8.0))
                 .looking_at(Vec3::default(), Vec3::unit_y()),
             ..Default::default()

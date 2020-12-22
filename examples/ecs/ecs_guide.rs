@@ -1,9 +1,10 @@
 use bevy::{
     app::{AppExit, ScheduleRunnerPlugin, ScheduleRunnerSettings},
+    ecs::SystemStage,
     prelude::*,
+    utils::Duration,
 };
 use rand::random;
-use std::time::Duration;
 
 /// This is a guided introduction to Bevy's "Entity Component System" (ECS)
 /// All Bevy app logic is built using the ECS pattern, so definitely pay attention!
@@ -141,7 +142,7 @@ fn game_over_system(
 // the initial "state" of our game. The only thing that distinguishes a "startup" system from a "normal" system is how it is registered:
 //      Startup: app.add_startup_system(startup_system)
 //      Normal:  app.add_system(normal_system)
-fn startup_system(mut commands: Commands, mut game_state: ResMut<GameState>) {
+fn startup_system(commands: &mut Commands, mut game_state: ResMut<GameState>) {
     // Create our game rules resource
     commands.insert_resource(GameRules {
         max_rounds: 10,
@@ -175,7 +176,7 @@ fn startup_system(mut commands: Commands, mut game_state: ResMut<GameState>) {
 // Command buffers give us the ability to queue up changes to our World without directly accessing it
 // NOTE: Command buffers must always come before resources and queries in system functions
 fn new_player_system(
-    mut commands: Commands,
+    commands: &mut Commands,
     game_rules: Res<GameRules>,
     mut game_state: ResMut<GameState>,
 ) {
@@ -257,7 +258,7 @@ fn main() {
         // Startup systems run exactly once BEFORE all other systems. These are generally used for
         // app initialization code (ex: adding entities and resources)
         .add_startup_system(startup_system.system())
-        // my_system.system() calls converts normal rust functions into ECS systems:
+        // my_system calls converts normal rust functions into ECS systems:
         .add_system(print_message_system.system())
         //
         // SYSTEM EXECUTION ORDER
@@ -276,14 +277,14 @@ fn main() {
         // This is where "stages" come in. A "stage" is a group of systems that execute (in parallel). Stages are executed in order,
         // and the next stage won't start until all systems in the current stage have finished.
         // add_system(system) adds systems to the UPDATE stage by default
-        // However we can manually specify the stage if we want to. The following is equivalent to add_system(score_system.system())
+        // However we can manually specify the stage if we want to. The following is equivalent to add_system(score_system)
         .add_system_to_stage(stage::UPDATE, score_system.system())
         // We can also create new stages. Here is what our games stage order will look like:
         // "before_round": new_player_system, new_round_system
         // "update": print_message_system, score_system
         // "after_round": score_check_system, game_over_system
-        .add_stage_before(stage::UPDATE, "before_round")
-        .add_stage_after(stage::UPDATE, "after_round")
+        .add_stage_before(stage::UPDATE, "before_round", SystemStage::parallel())
+        .add_stage_after(stage::UPDATE, "after_round", SystemStage::parallel())
         .add_system_to_stage("before_round", new_round_system.system())
         .add_system_to_stage("before_round", new_player_system.system())
         .add_system_to_stage("after_round", score_check_system.system())

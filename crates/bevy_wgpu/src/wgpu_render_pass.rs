@@ -5,6 +5,7 @@ use bevy_render::{
     pipeline::{BindGroupDescriptorId, PipelineDescriptor},
     renderer::{BindGroupId, BufferId, RenderContext},
 };
+use bevy_utils::tracing::trace;
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -29,6 +30,10 @@ impl<'a> RenderPass for WgpuRenderPass<'a> {
     fn set_viewport(&mut self, x: f32, y: f32, w: f32, h: f32, min_depth: f32, max_depth: f32) {
         self.render_pass
             .set_viewport(x, y, w, h, min_depth, max_depth);
+    }
+
+    fn set_scissor_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        self.render_pass.set_scissor_rect(x, y, w, h);
     }
 
     fn set_stencil_reference(&mut self, reference: u32) {
@@ -69,8 +74,12 @@ impl<'a> RenderPass for WgpuRenderPass<'a> {
                     } else {
                         EMPTY
                     };
+                self.wgpu_resources
+                    .used_bind_group_sender
+                    .send(bind_group)
+                    .unwrap();
 
-                log::trace!(
+                trace!(
                     "set bind group {:?} {:?}: {:?}",
                     bind_group_descriptor_id,
                     dynamic_uniform_indices,
@@ -88,7 +97,7 @@ impl<'a> RenderPass for WgpuRenderPass<'a> {
             .render_pipelines
             .get(pipeline_handle)
             .expect(
-            "Attempted to use a pipeline that does not exist in this RenderPass's RenderContext",
+            "Attempted to use a pipeline that does not exist in this `RenderPass`'s `RenderContext`.",
         );
         self.render_pass.set_pipeline(pipeline);
     }

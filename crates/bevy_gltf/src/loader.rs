@@ -2,12 +2,18 @@ use anyhow::Result;
 use bevy_asset::{AssetIoError, AssetLoader, AssetPath, LoadContext, LoadedAsset};
 use bevy_ecs::{bevy_utils::BoxedFuture, World, WorldBuilderSource};
 use bevy_math::Mat4;
-use bevy_pbr::prelude::{PbrComponents, StandardMaterial};
+use bevy_pbr::prelude::{PbrBundle, StandardMaterial};
 use bevy_render::{
+    camera::{
+        Camera, CameraProjection, OrthographicProjection, PerspectiveProjection, VisibleEntities,
+    },
     mesh::{Indices, Mesh, VertexAttributeValues},
     pipeline::PrimitiveTopology,
     prelude::{Color, Texture},
-    texture::{AddressMode, FilterMode, SamplerDescriptor, TextureFormat},
+    render_graph::base,
+    texture::{
+        AddressMode, Extent3d, FilterMode, SamplerDescriptor, TextureDimension, TextureFormat,
+    },
 };
 use bevy_scene::Scene;
 use bevy_transform::{
@@ -17,7 +23,7 @@ use bevy_transform::{
 use gltf::{
     mesh::Mode,
     texture::{MagFilter, MinFilter, WrappingMode},
-    Primitive,
+    Material, Primitive,
 };
 use image::{GenericImageView, ImageFormat};
 use std::path::Path;
@@ -26,25 +32,23 @@ use thiserror::Error;
 /// An error that occurs when loading a GLTF file
 #[derive(Error, Debug)]
 pub enum GltfError {
-    #[error("Unsupported primitive mode.")]
+    #[error("unsupported primitive mode")]
     UnsupportedPrimitive { mode: Mode },
-    #[error("Unsupported min filter.")]
+    #[error("unsupported min filter")]
     UnsupportedMinFilter { filter: MinFilter },
-    #[error("Invalid GLTF file.")]
+    #[error("invalid GLTF file")]
     Gltf(#[from] gltf::Error),
-    #[error("Binary blob is missing.")]
+    #[error("binary blob is missing")]
     MissingBlob,
-    #[error("Failed to decode base64 mesh data.")]
+    #[error("failed to decode base64 mesh data")]
     Base64Decode(#[from] base64::DecodeError),
-    #[error("Unsupported buffer format.")]
+    #[error("unsupported buffer format")]
     BufferFormatUnsupported,
-    #[error("Invalid image mime type.")]
+    #[error("invalid image mime type")]
     InvalidImageMimeType(String),
-    #[error("Failed to convert image to rgb8.")]
-    ImageRgb8ConversionFailure,
-    #[error("Failed to load an image.")]
+    #[error("failed to load an image")]
     ImageError(#[from] image::ImageError),
-    #[error("Failed to load an asset path.")]
+    #[error("failed to load an asset path")]
     AssetIoError(#[from] AssetIoError),
 }
 
@@ -62,8 +66,7 @@ impl AssetLoader for GltfLoader {
     }
 
     fn extensions(&self) -> &[&str] {
-        static EXTENSIONS: &[&str] = &["gltf", "glb"];
-        EXTENSIONS
+        &["gltf", "glb"]
     }
 }
 
@@ -128,16 +131,15 @@ async fn load_gltf<'a, 'b>(
             }?;
             let image = image::load_from_memory_with_format(buffer, format)?;
             let size = image.dimensions();
-            let image = image
-                .as_rgba8()
-                .ok_or(GltfError::ImageRgb8ConversionFailure)?;
+            let image = image.into_rgba8();
 
             let texture_label = texture_label(&texture);
             load_context.set_labeled_asset(
                 &texture_label,
                 LoadedAsset::new(Texture {
                     data: image.clone().into_vec(),
-                    size: bevy_math::f32::vec2(size.0 as f32, size.1 as f32),
+                    size: Extent3d::new(size.0, size.1, 1),
+                    dimension: TextureDimension::D2,
                     format: TextureFormat::Rgba8Unorm,
                     sampler: texture_sampler(&texture)?,
                 }),
@@ -146,38 +148,7 @@ async fn load_gltf<'a, 'b>(
     }
 
     for material in gltf.materials() {
-        let material_label = material_label(&material);
-        let pbr = material.pbr_metallic_roughness();
-        let mut dependencies = Vec::new();
-        let texture_handle = if let Some(info) = pbr.base_color_texture() {
-            match info.texture().source().source() {
-                gltf::image::Source::View { .. } => {
-                    let label = texture_label(&info.texture());
-                    let path = AssetPath::new_ref(load_context.path(), Some(&label));
-                    Some(load_context.get_handle(path))
-                }
-                gltf::image::Source::Uri { uri, .. } => {
-                    let parent = load_context.path().parent().unwrap();
-                    let image_path = parent.join(uri);
-                    let asset_path = AssetPath::new(image_path, None);
-                    let handle = load_context.get_handle(asset_path.clone());
-                    dependencies.push(asset_path);
-                    Some(handle)
-                }
-            }
-        } else {
-            None
-        };
-        let color = pbr.base_color_factor();
-        load_context.set_labeled_asset(
-            &material_label,
-            LoadedAsset::new(StandardMaterial {
-                albedo: Color::rgba(color[0], color[1], color[2], color[3]),
-                albedo_texture: texture_handle,
-                ..Default::default()
-            })
-            .with_dependencies(dependencies),
-        )
+        load_material(&material, load_context);
     }
 
     for scene in gltf.scenes() {
@@ -203,50 +174,140 @@ async fn load_gltf<'a, 'b>(
     Ok(())
 }
 
+fn load_material(material: &Material, load_context: &mut LoadContext) {
+    let material_label = material_label(&material);
+    let pbr = material.pbr_metallic_roughness();
+    let mut dependencies = Vec::new();
+    let texture_handle = if let Some(info) = pbr.base_color_texture() {
+        match info.texture().source().source() {
+            gltf::image::Source::View { .. } => {
+                let label = texture_label(&info.texture());
+                let path = AssetPath::new_ref(load_context.path(), Some(&label));
+                Some(load_context.get_handle(path))
+            }
+            gltf::image::Source::Uri { uri, .. } => {
+                let parent = load_context.path().parent().unwrap();
+                let image_path = parent.join(uri);
+                let asset_path = AssetPath::new(image_path, None);
+                let handle = load_context.get_handle(asset_path.clone());
+                dependencies.push(asset_path);
+                Some(handle)
+            }
+        }
+    } else {
+        None
+    };
+
+    let color = pbr.base_color_factor();
+    load_context.set_labeled_asset(
+        &material_label,
+        LoadedAsset::new(StandardMaterial {
+            albedo: Color::rgba(color[0], color[1], color[2], color[3]),
+            albedo_texture: texture_handle,
+            ..Default::default()
+        })
+        .with_dependencies(dependencies),
+    )
+}
+
 fn load_node(
-    node: &gltf::Node,
+    gltf_node: &gltf::Node,
     world_builder: &mut WorldChildBuilder,
     load_context: &mut LoadContext,
     buffer_data: &[Vec<u8>],
 ) -> Result<(), GltfError> {
-    let transform = node.transform();
+    let transform = gltf_node.transform();
     let mut gltf_error = None;
-    world_builder
-        .spawn((
-            Transform::from_matrix(Mat4::from_cols_array_2d(&transform.matrix())),
-            GlobalTransform::default(),
-        ))
-        .with_children(|parent| {
-            if let Some(mesh) = node.mesh() {
-                for primitive in mesh.primitives() {
-                    let primitive_label = primitive_label(&mesh, &primitive);
-                    let mesh_asset_path =
-                        AssetPath::new_ref(load_context.path(), Some(&primitive_label));
-                    let material = primitive.material();
-                    let material_label = material_label(&material);
-                    let material_asset_path =
-                        AssetPath::new_ref(load_context.path(), Some(&material_label));
-                    parent.spawn(PbrComponents {
-                        mesh: load_context.get_handle(mesh_asset_path),
-                        material: load_context.get_handle(material_asset_path),
-                        ..Default::default()
-                    });
-                }
-            }
+    let node = world_builder.spawn((
+        Transform::from_matrix(Mat4::from_cols_array_2d(&transform.matrix())),
+        GlobalTransform::default(),
+    ));
 
-            if parent.current_entity().is_none() {
+    // create camera node
+    if let Some(camera) = gltf_node.camera() {
+        node.with(VisibleEntities {
+            ..Default::default()
+        });
+
+        match camera.projection() {
+            gltf::camera::Projection::Orthographic(orthographic) => {
+                let xmag = orthographic.xmag();
+                let ymag = orthographic.ymag();
+                let orthographic_projection: OrthographicProjection = OrthographicProjection {
+                    left: -xmag,
+                    right: xmag,
+                    top: ymag,
+                    bottom: -ymag,
+                    far: orthographic.zfar(),
+                    near: orthographic.znear(),
+                    ..Default::default()
+                };
+
+                node.with(Camera {
+                    name: Some(base::camera::CAMERA_2D.to_owned()),
+                    projection_matrix: orthographic_projection.get_projection_matrix(),
+                    ..Default::default()
+                });
+                node.with(orthographic_projection);
+            }
+            gltf::camera::Projection::Perspective(perspective) => {
+                let mut perspective_projection: PerspectiveProjection = PerspectiveProjection {
+                    fov: perspective.yfov(),
+                    near: perspective.znear(),
+                    ..Default::default()
+                };
+                if let Some(zfar) = perspective.zfar() {
+                    perspective_projection.far = zfar;
+                }
+                if let Some(aspect_ratio) = perspective.aspect_ratio() {
+                    perspective_projection.aspect_ratio = aspect_ratio;
+                }
+                node.with(Camera {
+                    name: Some(base::camera::CAMERA_3D.to_owned()),
+                    projection_matrix: perspective_projection.get_projection_matrix(),
+                    ..Default::default()
+                });
+                node.with(perspective_projection);
+            }
+        }
+    }
+
+    node.with_children(|parent| {
+        if let Some(mesh) = gltf_node.mesh() {
+            // append primitives
+            for primitive in mesh.primitives() {
+                let material = primitive.material();
+                let material_label = material_label(&material);
+
+                // This will make sure we load the default material now since it would not have been
+                // added when iterating over all the gltf materials (since the default material is
+                // not explicitly listed in the gltf).
+                if !load_context.has_labeled_asset(&material_label) {
+                    load_material(&material, load_context);
+                }
+
+                let primitive_label = primitive_label(&mesh, &primitive);
+                let mesh_asset_path =
+                    AssetPath::new_ref(load_context.path(), Some(&primitive_label));
+                let material_asset_path =
+                    AssetPath::new_ref(load_context.path(), Some(&material_label));
+
+                parent.spawn(PbrBundle {
+                    mesh: load_context.get_handle(mesh_asset_path),
+                    material: load_context.get_handle(material_asset_path),
+                    ..Default::default()
+                });
+            }
+        }
+
+        // append other nodes
+        for child in gltf_node.children() {
+            if let Err(err) = load_node(&child, parent, load_context, buffer_data) {
+                gltf_error = Some(err);
                 return;
             }
-
-            parent.with_children(|parent| {
-                for child in node.children() {
-                    if let Err(err) = load_node(&child, parent, load_context, buffer_data) {
-                        gltf_error = Some(err);
-                        return;
-                    }
-                }
-            });
-        });
+        }
+    });
     if let Some(err) = gltf_error {
         Err(err)
     } else {

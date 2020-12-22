@@ -17,7 +17,7 @@ pub struct WgpuRenderer {
     pub queue: wgpu::Queue,
     pub window_resized_event_reader: EventReader<WindowResized>,
     pub window_created_event_reader: EventReader<WindowCreated>,
-    pub intialized: bool,
+    pub initialized: bool,
 }
 
 impl WgpuRenderer {
@@ -59,7 +59,7 @@ impl WgpuRenderer {
             queue,
             window_resized_event_reader: Default::default(),
             window_created_event_reader: Default::default(),
-            intialized: false,
+            initialized: false,
         }
     }
 
@@ -78,7 +78,7 @@ impl WgpuRenderer {
         {
             let window = windows
                 .get(window_created_event.id)
-                .expect("Received window created event for non-existent window");
+                .expect("Received window created event for non-existent window.");
             #[cfg(feature = "bevy_winit")]
             {
                 let winit_windows = resources.get::<bevy_winit::WinitWindows>().unwrap();
@@ -115,6 +115,6 @@ impl WgpuRenderer {
 
         let render_resource_context = resources.get::<Box<dyn RenderResourceContext>>().unwrap();
         render_resource_context.drop_all_swap_chain_textures();
-        render_resource_context.clear_bind_groups();
+        render_resource_context.remove_stale_bind_groups();
     }
 }

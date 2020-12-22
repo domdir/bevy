@@ -1,13 +1,13 @@
 use bevy::{
     prelude::*,
+    reflect::TypeUuid,
     render::{
         mesh::{shape, VertexAttributeValues},
-        pipeline::{DynamicBinding, PipelineDescriptor, PipelineSpecialization, RenderPipeline},
+        pipeline::{PipelineDescriptor, RenderPipeline},
         render_graph::{base, AssetRenderResourcesNode, RenderGraph},
         renderer::RenderResources,
         shader::{ShaderStage, ShaderStages},
     },
-    type_registry::TypeUuid,
 };
 
 /// This example illustrates how to add a custom attribute to a mesh and use it in a custom shader.
@@ -52,7 +52,7 @@ void main() {
 "#;
 
 fn setup(
-    mut commands: Commands,
+    commands: &mut Commands,
     mut pipelines: ResMut<Assets<PipelineDescriptor>>,
     mut shaders: ResMut<Assets<Shader>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -83,7 +83,7 @@ fn setup(
     let material = materials.add(MyMaterialWithVertexColorSupport {});
 
     // create a generic cube
-    let mut cube_with_vertex_colors = Mesh::from(shape::Cube { size: 1.0 });
+    let mut cube_with_vertex_colors = Mesh::from(shape::Cube { size: 2.0 });
 
     // insert our custom color attribute with some nice colors!
     cube_with_vertex_colors.set_attribute(
@@ -127,28 +127,17 @@ fn setup(
     // Setup our world
     commands
         // cube
-        .spawn(MeshComponents {
+        .spawn(MeshBundle {
             mesh: meshes.add(cube_with_vertex_colors), // use our cube with vertex colors
-            render_pipelines: RenderPipelines::from_pipelines(vec![RenderPipeline::specialized(
+            render_pipelines: RenderPipelines::from_pipelines(vec![RenderPipeline::new(
                 pipeline_handle,
-                // NOTE: in the future you wont need to manually declare dynamic bindings
-                PipelineSpecialization {
-                    dynamic_bindings: vec![
-                        // Transform
-                        DynamicBinding {
-                            bind_group: 1,
-                            binding: 0,
-                        },
-                    ],
-                    ..Default::default()
-                },
             )]),
             transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
             ..Default::default()
         })
         .with(material)
         // camera
-        .spawn(Camera3dComponents {
+        .spawn(Camera3dBundle {
             transform: Transform::from_translation(Vec3::new(3.0, 5.0, -8.0))
                 .looking_at(Vec3::default(), Vec3::unit_y()),
             ..Default::default()

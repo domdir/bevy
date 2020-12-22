@@ -4,16 +4,16 @@ use rand::random;
 struct Velocity(Vec2);
 
 fn spawn_system(
-    mut commands: Commands,
+    commands: &mut Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn(Camera2dComponents::default());
+    commands.spawn(Camera2dBundle::default());
     let texture_handle = asset_server.load("branding/icon.png");
     let material = materials.add(texture_handle.into());
     for _ in 0..128 {
         commands
-            .spawn(SpriteComponents {
+            .spawn(SpriteBundle {
                 material: material.clone(),
                 transform: Transform::from_scale(Vec3::splat(0.1)),
                 ..Default::default()
@@ -47,23 +47,23 @@ fn bounce_system(
     windows: Res<Windows>,
     mut sprites: Query<(&Transform, &mut Velocity)>,
 ) {
-    let window = windows.get_primary().expect("No primary window");
+    let window = windows.get_primary().expect("No primary window.");
     let width = window.width();
     let height = window.height();
-    let left = width as f32 / -2.0;
-    let right = width as f32 / 2.0;
-    let bottom = height as f32 / -2.0;
-    let top = height as f32 / 2.0;
+    let left = width / -2.0;
+    let right = width / 2.0;
+    let bottom = height / -2.0;
+    let top = height / 2.0;
     sprites
         // Batch size of 32 is chosen to limit the overhead of
         // ParallelIterator, since negating a vector is very inexpensive.
         .par_iter_mut(32)
         // Filter out sprites that don't need to be bounced
         .filter(|(transform, _)| {
-            !(left < transform.translation.x()
-                && transform.translation.x() < right
-                && bottom < transform.translation.y()
-                && transform.translation.y() < top)
+            !(left < transform.translation.x
+                && transform.translation.x < right
+                && bottom < transform.translation.y
+                && transform.translation.y < top)
         })
         // For simplicity, just reverse the velocity; don't use realistic bounces
         .for_each(&pool, |(_, mut v)| {

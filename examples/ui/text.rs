@@ -16,8 +16,8 @@ fn main() {
 // A unit struct to help identify the FPS UI component, since there may be many Text components
 struct FpsText;
 
-fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<(&mut Text, &FpsText)>) {
-    for (mut text, _tag) in query.iter_mut() {
+fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<&mut Text, With<FpsText>>) {
+    for mut text in query.iter_mut() {
         if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(average) = fps.average() {
                 text.value = format!("FPS: {:.2}", average);
@@ -26,12 +26,12 @@ fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<(&mut Text
     }
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup(commands: &mut Commands, asset_server: Res<AssetServer>) {
     commands
         // 2d camera
-        .spawn(UiCameraComponents::default())
+        .spawn(CameraUiBundle::default())
         // texture
-        .spawn(TextComponents {
+        .spawn(TextBundle {
             style: Style {
                 align_self: AlignSelf::FlexEnd,
                 ..Default::default()
@@ -42,6 +42,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 style: TextStyle {
                     font_size: 60.0,
                     color: Color::WHITE,
+                    ..Default::default()
                 },
             },
             ..Default::default()

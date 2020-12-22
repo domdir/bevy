@@ -1,12 +1,13 @@
 use super::VertexFormat;
-use bevy_property::Property;
+use bevy_reflect::{Reflect, ReflectDeserialize};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     hash::{Hash, Hasher},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Default, Property, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Default, Reflect, Serialize, Deserialize)]
+#[reflect_value(Serialize, Deserialize, PartialEq)]
 pub struct VertexBufferDescriptor {
     pub name: Cow<'static, str>,
     pub stride: u64,
@@ -14,7 +15,6 @@ pub struct VertexBufferDescriptor {
     pub attributes: Vec<VertexAttributeDescriptor>,
 }
 
-pub const VERTEX_FALLBACK_LAYOUT_NAME: &str = "Fallback";
 impl VertexBufferDescriptor {
     pub fn new_from_attribute(
         attribute: VertexAttributeDescriptor,

@@ -1,13 +1,13 @@
 use crate::Rect;
 use bevy_asset::Handle;
-use bevy_core::Bytes;
+use bevy_core::Byteable;
 use bevy_math::Vec2;
+use bevy_reflect::TypeUuid;
 use bevy_render::{
     color::Color,
     renderer::{RenderResource, RenderResources},
     texture::Texture,
 };
-use bevy_type_registry::TypeUuid;
 use bevy_utils::HashMap;
 
 /// An atlas containing multiple textures (like a spritesheet or a tilemap)
@@ -25,9 +25,7 @@ pub struct TextureAtlas {
     pub texture_handles: Option<HashMap<Handle<Texture>, usize>>,
 }
 
-// NOTE: cannot do `unsafe impl Byteable` here because Vec3 takes up the space of a Vec4. If/when glam changes this we can swap out
-// Bytes for Byteable as a micro-optimization. https://github.com/bitshifter/glam-rs/issues/36
-#[derive(Bytes, Debug, RenderResources, RenderResource)]
+#[derive(Debug, RenderResources, RenderResource)]
 #[render_resources(from_self)]
 pub struct TextureAtlasSprite {
     pub color: Color,
@@ -42,6 +40,8 @@ impl Default for TextureAtlasSprite {
         }
     }
 }
+
+unsafe impl Byteable for TextureAtlasSprite {}
 
 impl TextureAtlasSprite {
     pub fn new(index: u32) -> TextureAtlasSprite {
@@ -91,29 +91,29 @@ impl TextureAtlas {
 
         for y in 0..rows {
             if y > 0 {
-                y_padding = padding.y();
+                y_padding = padding.y;
             }
             for x in 0..columns {
                 if x > 0 {
-                    x_padding = padding.x();
+                    x_padding = padding.x;
                 }
 
                 let rect_min = Vec2::new(
-                    (tile_size.x() + x_padding) * x as f32,
-                    (tile_size.y() + y_padding) * y as f32,
+                    (tile_size.x + x_padding) * x as f32,
+                    (tile_size.y + y_padding) * y as f32,
                 );
 
                 sprites.push(Rect {
                     min: rect_min,
-                    max: Vec2::new(rect_min.x() + tile_size.x(), rect_min.y() + tile_size.y()),
+                    max: Vec2::new(rect_min.x + tile_size.x, rect_min.y + tile_size.y),
                 })
             }
         }
 
         TextureAtlas {
             size: Vec2::new(
-                ((tile_size.x() + x_padding) * columns as f32) - x_padding,
-                ((tile_size.y() + y_padding) * rows as f32) - y_padding,
+                ((tile_size.x + x_padding) * columns as f32) - x_padding,
+                ((tile_size.y + y_padding) * rows as f32) - y_padding,
             ),
             textures: sprites,
             texture,

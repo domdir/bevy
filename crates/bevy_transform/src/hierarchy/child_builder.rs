@@ -1,7 +1,5 @@
 use crate::prelude::{Children, Parent, PreviousParent};
-use bevy_ecs::{
-    Command, Commands, CommandsInternal, Component, DynamicBundle, Entity, Resources, World,
-};
+use bevy_ecs::{Command, Commands, Component, DynamicBundle, Entity, Resources, World};
 use smallvec::SmallVec;
 
 #[derive(Debug)]
@@ -21,7 +19,7 @@ impl Command for InsertChildren {
         {
             let mut added = false;
             if let Ok(mut children) = world.get_mut::<Children>(self.parent) {
-                children.insert_from_slice(self.index, &self.children);
+                children.0.insert_from_slice(self.index, &self.children);
                 added = true;
             }
 
@@ -42,7 +40,7 @@ pub struct PushChildren {
 }
 
 pub struct ChildBuilder<'a> {
-    commands: &'a mut CommandsInternal,
+    commands: &'a mut Commands,
     push_children: PushChildren,
 }
 
@@ -56,7 +54,7 @@ impl Command for PushChildren {
         {
             let mut added = false;
             if let Ok(mut children) = world.get_mut::<Children>(self.parent) {
-                children.extend(self.children.iter().cloned());
+                children.0.extend(self.children.iter().cloned());
                 added = true;
             }
 
@@ -75,12 +73,16 @@ impl<'a> ChildBuilder<'a> {
         self.commands.spawn(components);
         self.push_children
             .children
-            .push(self.commands.current_entity.unwrap());
+            .push(self.commands.current_entity().unwrap());
         self
     }
 
     pub fn current_entity(&self) -> Option<Entity> {
-        self.commands.current_entity
+        self.commands.current_entity()
+    }
+
+    pub fn parent_entity(&self) -> Entity {
+        self.push_children.parent
     }
 
     pub fn with_bundle(
@@ -99,9 +101,14 @@ impl<'a> ChildBuilder<'a> {
     pub fn for_current_entity(&mut self, func: impl FnOnce(Entity)) -> &mut Self {
         let current_entity = self
             .commands
-            .current_entity
+            .current_entity()
             .expect("The 'current entity' is not set. You should spawn an entity first.");
         func(current_entity);
+        self
+    }
+
+    pub fn add_command<C: Command + 'static>(&mut self, command: C) -> &mut Self {
+        self.commands.add_command(command);
         self
     }
 }
@@ -114,56 +121,47 @@ pub trait BuildChildren {
 
 impl BuildChildren for Commands {
     fn with_children(&mut self, parent: impl FnOnce(&mut ChildBuilder)) -> &mut Self {
-        {
-            let mut commands = self.commands.lock();
-            let current_entity = commands.current_entity.expect("Cannot add children because the 'current entity' is not set. You should spawn an entity first.");
-            commands.current_entity = None;
-            let push_children = {
-                let mut builder = ChildBuilder {
-                    commands: &mut commands,
-                    push_children: PushChildren {
-                        children: SmallVec::default(),
-                        parent: current_entity,
-                    },
-                };
-                parent(&mut builder);
-                builder.push_children
+        let current_entity = self.current_entity().expect("Cannot add children because the 'current entity' is not set. You should spawn an entity first.");
+        self.clear_current_entity();
+        let push_children = {
+            let mut builder = ChildBuilder {
+                commands: self,
+                push_children: PushChildren {
+                    children: SmallVec::default(),
+                    parent: current_entity,
+                },
             };
+            parent(&mut builder);
+            builder.push_children
+        };
 
-            commands.current_entity = Some(current_entity);
-            commands.add_command(push_children);
-        }
+        self.set_current_entity(current_entity);
+        self.add_command(push_children);
         self
     }
 
     fn push_children(&mut self, parent: Entity, children: &[Entity]) -> &mut Self {
-        {
-            let mut commands = self.commands.lock();
-            commands.add_command(PushChildren {
-                children: SmallVec::from(children),
-                parent,
-            });
-        }
+        self.add_command(PushChildren {
+            children: SmallVec::from(children),
+            parent,
+        });
         self
     }
 
     fn insert_children(&mut self, parent: Entity, index: usize, children: &[Entity]) -> &mut Self {
-        {
-            let mut commands = self.commands.lock();
-            commands.add_command(InsertChildren {
-                children: SmallVec::from(children),
-                index,
-                parent,
-            });
-        }
+        self.add_command(InsertChildren {
+            children: SmallVec::from(children),
+            index,
+            parent,
+        });
         self
     }
 }
 
 impl<'a> BuildChildren for ChildBuilder<'a> {
     fn with_children(&mut self, spawn_children: impl FnOnce(&mut ChildBuilder)) -> &mut Self {
-        let current_entity = self.commands.current_entity.expect("Cannot add children because the 'current entity' is not set. You should spawn an entity first.");
-        self.commands.current_entity = None;
+        let current_entity = self.commands.current_entity().expect("Cannot add children because the 'current entity' is not set. You should spawn an entity first.");
+        self.commands.clear_current_entity();
         let push_children = {
             let mut builder = ChildBuilder {
                 commands: self.commands,
@@ -177,7 +175,7 @@ impl<'a> BuildChildren for ChildBuilder<'a> {
             builder.push_children
         };
 
-        self.commands.current_entity = Some(current_entity);
+        self.commands.set_current_entity(current_entity);
         self.commands.add_command(push_children);
         self
     }

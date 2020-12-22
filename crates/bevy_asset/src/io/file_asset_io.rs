@@ -45,13 +45,14 @@ impl AssetIo for FileAssetIo {
     fn load_path<'a>(&'a self, path: &'a Path) -> BoxedFuture<'a, Result<Vec<u8>, AssetIoError>> {
         Box::pin(async move {
             let mut bytes = Vec::new();
-            match File::open(self.root_path.join(path)) {
+            let full_path = self.root_path.join(path);
+            match File::open(&full_path) {
                 Ok(mut file) => {
                     file.read_to_end(&mut bytes)?;
                 }
                 Err(e) => {
                     return if e.kind() == std::io::ErrorKind::NotFound {
-                        Err(AssetIoError::NotFound(path.to_owned()))
+                        Err(AssetIoError::NotFound(full_path))
                     } else {
                         Err(e.into())
                     }
@@ -121,7 +122,7 @@ pub fn filesystem_watcher_system(asset_server: Res<AssetServer>) {
             let event = match watcher.receiver.try_recv() {
                 Ok(result) => result.unwrap(),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => panic!("FilesystemWatcher disconnected"),
+                Err(TryRecvError::Disconnected) => panic!("FilesystemWatcher disconnected."),
             };
             if let notify::event::Event {
                 kind: notify::event::EventKind::Modify(_),

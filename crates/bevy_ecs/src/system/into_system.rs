@@ -1,426 +1,345 @@
-pub use super::Query;
+use super::system_param::FetchSystemParam;
 use crate::{
-    resource::{FetchResource, ResourceQuery, Resources, UnsafeClone},
-    system::{Commands, System, SystemId, ThreadLocalExecution},
-    QueryAccess, QuerySet, QueryTuple, TypeAccess,
+    ArchetypeComponent, Commands, QueryAccess, Resources, System, SystemId, SystemParam,
+    ThreadLocalExecution, TypeAccess, World,
 };
-use bevy_hecs::{ArchetypeComponent, Fetch, Query as HecsQuery, World};
-use std::{any::TypeId, borrow::Cow};
+use parking_lot::Mutex;
+use std::{any::TypeId, borrow::Cow, cell::UnsafeCell, sync::Arc};
 
-#[derive(Debug)]
-pub(crate) struct SystemFn<State, F, ThreadLocalF, Init, Update>
-where
-    F: FnMut(&World, &Resources, &mut State) + Send + Sync,
-    ThreadLocalF: FnMut(&mut World, &mut Resources, &mut State) + Send + Sync,
-    Init: FnMut(&mut World, &mut Resources, &mut State) + Send + Sync,
-    Update: FnMut(&World, &mut TypeAccess<ArchetypeComponent>, &mut State) + Send + Sync,
-    State: Send + Sync,
-{
-    pub state: State,
-    pub func: F,
-    pub thread_local_func: ThreadLocalF,
-    pub init_func: Init,
-    pub thread_local_execution: ThreadLocalExecution,
-    pub resource_access: TypeAccess<TypeId>,
-    pub name: Cow<'static, str>,
-    pub id: SystemId,
-    pub archetype_component_access: TypeAccess<ArchetypeComponent>,
-    pub update_func: Update,
+pub struct SystemState {
+    pub(crate) id: SystemId,
+    pub(crate) name: Cow<'static, str>,
+    pub(crate) archetype_component_access: TypeAccess<ArchetypeComponent>,
+    pub(crate) resource_access: TypeAccess<TypeId>,
+    pub(crate) local_resource_access: TypeAccess<TypeId>,
+    pub(crate) query_archetype_component_accesses: Vec<TypeAccess<ArchetypeComponent>>,
+    pub(crate) query_accesses: Vec<Vec<QueryAccess>>,
+    pub(crate) query_type_names: Vec<&'static str>,
+    pub(crate) commands: UnsafeCell<Commands>,
+    pub(crate) arc_commands: Option<Arc<Mutex<Commands>>>,
+    pub(crate) current_query_index: UnsafeCell<usize>,
 }
 
-impl<State, F, ThreadLocalF, Init, Update> System for SystemFn<State, F, ThreadLocalF, Init, Update>
-where
-    F: FnMut(&World, &Resources, &mut State) + Send + Sync,
-    ThreadLocalF: FnMut(&mut World, &mut Resources, &mut State) + Send + Sync,
-    Init: FnMut(&mut World, &mut Resources, &mut State) + Send + Sync,
-    Update: FnMut(&World, &mut TypeAccess<ArchetypeComponent>, &mut State) + Send + Sync,
-    State: Send + Sync,
-{
-    fn name(&self) -> Cow<'static, str> {
-        self.name.clone()
+// SAFE: UnsafeCell<Commands> and UnsafeCell<usize> only accessed from the thread they are scheduled on
+unsafe impl Sync for SystemState {}
+
+impl SystemState {
+    pub fn reset_indices(&mut self) {
+        // SAFE: done with unique mutable access to Self
+        unsafe {
+            *self.current_query_index.get() = 0;
+        }
     }
 
-    fn update(&mut self, world: &World) {
-        (self.update_func)(world, &mut self.archetype_component_access, &mut self.state);
+    pub fn update(&mut self, world: &World) {
+        self.archetype_component_access.clear();
+        let mut conflict_index = None;
+        let mut conflict_name = None;
+        for (i, (query_accesses, component_access)) in self
+            .query_accesses
+            .iter()
+            .zip(self.query_archetype_component_accesses.iter_mut())
+            .enumerate()
+        {
+            component_access.clear();
+            for query_access in query_accesses.iter() {
+                query_access.get_world_archetype_access(world, Some(component_access));
+            }
+            if !component_access.is_compatible(&self.archetype_component_access) {
+                conflict_index = Some(i);
+                conflict_name = component_access
+                    .get_conflict(&self.archetype_component_access)
+                    .and_then(|archetype_component| {
+                        query_accesses
+                            .iter()
+                            .filter_map(|query_access| {
+                                query_access.get_type_name(archetype_component.component)
+                            })
+                            .next()
+                    });
+                break;
+            }
+            self.archetype_component_access.union(component_access);
+        }
+        if let Some(conflict_index) = conflict_index {
+            let mut conflicts_with_index = None;
+            for prior_index in 0..conflict_index {
+                if !self.query_archetype_component_accesses[conflict_index]
+                    .is_compatible(&self.query_archetype_component_accesses[prior_index])
+                {
+                    conflicts_with_index = Some(prior_index);
+                }
+            }
+            panic!("System {} has conflicting queries. {} conflicts with the component access [{}] in this prior query: {}.",
+                self.name,
+                self.query_type_names[conflict_index],
+                conflict_name.unwrap_or("Unknown"),
+                conflicts_with_index.map(|index| self.query_type_names[index]).unwrap_or("Unknown"));
+        }
     }
+}
 
-    fn archetype_component_access(&self) -> &TypeAccess<ArchetypeComponent> {
-        &self.archetype_component_access
-    }
+pub struct FuncSystem<Out> {
+    func:
+        Box<dyn FnMut(&mut SystemState, &World, &Resources) -> Option<Out> + Send + Sync + 'static>,
+    thread_local_func:
+        Box<dyn FnMut(&mut SystemState, &mut World, &mut Resources) + Send + Sync + 'static>,
+    init_func: Box<dyn FnMut(&mut SystemState, &World, &mut Resources) + Send + Sync + 'static>,
+    state: SystemState,
+}
 
-    fn resource_access(&self) -> &TypeAccess<TypeId> {
-        &self.resource_access
-    }
+impl<Out: 'static> System for FuncSystem<Out> {
+    type In = ();
+    type Out = Out;
 
-    fn thread_local_execution(&self) -> ThreadLocalExecution {
-        self.thread_local_execution
-    }
-
-    #[inline]
-    fn run(&mut self, world: &World, resources: &Resources) {
-        (self.func)(world, resources, &mut self.state);
-    }
-
-    fn run_thread_local(&mut self, world: &mut World, resources: &mut Resources) {
-        (self.thread_local_func)(world, resources, &mut self.state);
-    }
-
-    fn initialize(&mut self, world: &mut World, resources: &mut Resources) {
-        (self.init_func)(world, resources, &mut self.state);
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        self.state.name.clone()
     }
 
     fn id(&self) -> SystemId {
-        self.id
+        self.state.id
+    }
+
+    fn update(&mut self, world: &World) {
+        self.state.update(world);
+    }
+
+    fn archetype_component_access(&self) -> &TypeAccess<ArchetypeComponent> {
+        &self.state.archetype_component_access
+    }
+
+    fn resource_access(&self) -> &TypeAccess<std::any::TypeId> {
+        &self.state.resource_access
+    }
+
+    fn thread_local_execution(&self) -> ThreadLocalExecution {
+        ThreadLocalExecution::NextFlush
+    }
+
+    unsafe fn run_unsafe(
+        &mut self,
+        _input: Self::In,
+        world: &World,
+        resources: &Resources,
+    ) -> Option<Out> {
+        (self.func)(&mut self.state, world, resources)
+    }
+
+    fn run_thread_local(&mut self, world: &mut World, resources: &mut Resources) {
+        (self.thread_local_func)(&mut self.state, world, resources)
+    }
+
+    fn initialize(&mut self, world: &mut World, resources: &mut Resources) {
+        (self.init_func)(&mut self.state, world, resources);
     }
 }
 
-/// Converts `Self` into a For-Each system
-pub trait IntoForEachSystem<CommandBuffer, R, C> {
-    fn system(self) -> Box<dyn System>;
+pub struct InputFuncSystem<In, Out> {
+    func: Box<
+        dyn FnMut(In, &mut SystemState, &World, &Resources) -> Option<Out> + Send + Sync + 'static,
+    >,
+    thread_local_func:
+        Box<dyn FnMut(&mut SystemState, &mut World, &mut Resources) + Send + Sync + 'static>,
+    init_func: Box<dyn FnMut(&mut SystemState, &World, &mut Resources) + Send + Sync + 'static>,
+    state: SystemState,
 }
 
-struct ForEachState {
-    commands: Commands,
-    query_access: QueryAccess,
+impl<In: 'static, Out: 'static> System for InputFuncSystem<In, Out> {
+    type In = In;
+    type Out = Out;
+
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        self.state.name.clone()
+    }
+
+    fn id(&self) -> SystemId {
+        self.state.id
+    }
+
+    fn update(&mut self, world: &World) {
+        self.state.update(world);
+    }
+
+    fn archetype_component_access(&self) -> &TypeAccess<ArchetypeComponent> {
+        &self.state.archetype_component_access
+    }
+
+    fn resource_access(&self) -> &TypeAccess<std::any::TypeId> {
+        &self.state.resource_access
+    }
+
+    fn thread_local_execution(&self) -> ThreadLocalExecution {
+        ThreadLocalExecution::NextFlush
+    }
+
+    unsafe fn run_unsafe(
+        &mut self,
+        input: In,
+        world: &World,
+        resources: &Resources,
+    ) -> Option<Out> {
+        (self.func)(input, &mut self.state, world, resources)
+    }
+
+    fn run_thread_local(&mut self, world: &mut World, resources: &mut Resources) {
+        (self.thread_local_func)(&mut self.state, world, resources)
+    }
+
+    fn initialize(&mut self, world: &mut World, resources: &mut Resources) {
+        (self.init_func)(&mut self.state, world, resources);
+    }
 }
 
-macro_rules! impl_into_foreach_system {
-    (($($commands: ident)*), ($($resource: ident),*), ($($component: ident),*)) => {
-        impl<Func, $($resource,)* $($component,)*> IntoForEachSystem<($($commands,)*), ($($resource,)*), ($($component,)*)> for Func
+pub trait IntoSystem<Params, SystemType: System> {
+    fn system(self) -> SystemType;
+}
+
+// Systems implicitly implement IntoSystem
+impl<Sys: System> IntoSystem<(), Sys> for Sys {
+    fn system(self) -> Sys {
+        self
+    }
+}
+pub struct In<In>(pub In);
+
+macro_rules! impl_into_system {
+    ($($param: ident),*) => {
+        impl<Func, Out, $($param: SystemParam),*> IntoSystem<($($param,)*), FuncSystem<Out>> for Func
         where
             Func:
-                FnMut($($commands,)* $($resource,)* $($component,)*) +
-                FnMut(
-                    $($commands,)*
-                    $(<<$resource as ResourceQuery>::Fetch as FetchResource>::Item,)*
-                    $(<<$component as HecsQuery>::Fetch as Fetch>::Item,)*)+
-                Send + Sync + 'static,
-            $($component: HecsQuery,)*
-            $($resource: ResourceQuery,)*
+                FnMut($($param),*) -> Out +
+                FnMut($(<<$param as SystemParam>::Fetch as FetchSystemParam>::Item),*) -> Out +
+                Send + Sync + 'static, Out: 'static
         {
-            #[allow(non_snake_case)]
             #[allow(unused_variables)]
             #[allow(unused_unsafe)]
-            fn system(mut self) -> Box<dyn System> {
-                let id = SystemId::new();
-                Box::new(SystemFn {
-                    state: ForEachState {
-                        commands: Commands::default(),
-                        query_access: <($($component,)*) as HecsQuery>::Fetch::access(),
+            #[allow(non_snake_case)]
+            fn system(mut self) -> FuncSystem<Out> {
+                FuncSystem {
+                    state: SystemState {
+                        name: std::any::type_name::<Self>().into(),
+                        archetype_component_access: TypeAccess::default(),
+                        resource_access: TypeAccess::default(),
+                        local_resource_access: TypeAccess::default(),
+                        id: SystemId::new(),
+                        commands: Default::default(),
+                        arc_commands: Default::default(),
+                        current_query_index: Default::default(),
+                        query_archetype_component_accesses: Vec::new(),
+                        query_accesses: Vec::new(),
+                        query_type_names: Vec::new(),
                     },
-                    thread_local_execution: ThreadLocalExecution::NextFlush,
-                    name: core::any::type_name::<Self>().into(),
-                    id,
-                    func: move |world, resources, state| {
-                        {
-                            let state_commands = &state.commands;
-                            if let Some(($($resource,)*)) = resources.query_system::<($($resource,)*)>(id) {
-                                // SAFE: the scheduler has ensured that there is no archetype clashing here
-                                unsafe {
-                                    for ($($component,)*) in world.query_unchecked::<($($component,)*)>() {
-                                        fn_call!(self, ($($commands, state_commands)*), ($($resource),*), ($($component),*))
-                                    }
-                                }
+                    func: Box::new(move |state, world, resources| {
+                        state.reset_indices();
+                        // let mut input = Some(input);
+                        unsafe {
+                            if let Some(($($param,)*)) = <<($($param,)*) as SystemParam>::Fetch as FetchSystemParam>::get_param(state, world, resources) {
+                                Some(self($($param),*))
+                            } else {
+                                None
                             }
                         }
-                    },
-                    thread_local_func: move |world, resources, state| {
-                        state.commands.apply(world, resources);
-                    },
-                    init_func: move |world, resources, state| {
-                        <($($resource,)*)>::initialize(resources, Some(id));
-                        state.commands.set_entity_reserver(world.get_entity_reserver())
-                    },
-                    resource_access: <<($($resource,)*) as ResourceQuery>::Fetch as FetchResource>::access(),
-                    archetype_component_access: TypeAccess::default(),
-                    update_func: |world, archetype_component_access, state| {
-                        archetype_component_access.clear();
-                        state.query_access.get_world_archetype_access(world, Some(archetype_component_access));
-                    },
-                })
+                    }),
+                    thread_local_func: Box::new(|state, world, resources| {
+                        // SAFE: this is called with unique access to SystemState
+                        unsafe {
+                            (&mut *state.commands.get()).apply(world, resources);
+                        }
+                        if let Some(ref commands) = state.arc_commands {
+                            let mut commands = commands.lock();
+                            commands.apply(world, resources);
+                        }
+                    }),
+                    init_func: Box::new(|state, world, resources| {
+                        <<($($param,)*) as SystemParam>::Fetch as FetchSystemParam>::init(state, world, resources)
+                    }),
+                }
             }
         }
-    };
-}
-
-struct QuerySystemState {
-    query_accesses: Vec<Vec<QueryAccess>>,
-    query_type_names: Vec<&'static str>,
-    archetype_component_accesses: Vec<TypeAccess<ArchetypeComponent>>,
-    commands: Commands,
-}
-
-/// Converts `Self` into a Query System
-pub trait IntoQuerySystem<Commands, R, Q, QS> {
-    fn system(self) -> Box<dyn System>;
-}
-
-macro_rules! impl_into_query_system {
-    (($($commands: ident)*), ($($resource: ident),*), ($($query: ident),*), ($($query_set: ident),*)) => {
-        impl<Func, $($resource,)* $($query,)* $($query_set,)*> IntoQuerySystem<($($commands,)*), ($($resource,)*), ($($query,)*), ($($query_set,)*)> for Func where
+        impl<Func, Input, Out, $($param: SystemParam),*> IntoSystem<(Input, $($param,)*), InputFuncSystem<Input, Out>> for Func
+        where
             Func:
-                FnMut($($commands,)* $($resource,)* $(Query<$query>,)* $(QuerySet<$query_set>,)*) +
-                FnMut(
-                    $($commands,)*
-                    $(<<$resource as ResourceQuery>::Fetch as FetchResource>::Item,)*
-                    $(Query<$query>,)*
-                    $(QuerySet<$query_set>,)*
-                ) +
-                Send + Sync +'static,
-            $($query: HecsQuery,)*
-            $($query_set: QueryTuple,)*
-            $($resource: ResourceQuery,)*
+                FnMut(In<Input>, $($param),*) -> Out +
+                FnMut(In<Input>, $(<<$param as SystemParam>::Fetch as FetchSystemParam>::Item),*) -> Out +
+                Send + Sync + 'static, Input: 'static, Out: 'static
         {
-            #[allow(non_snake_case)]
             #[allow(unused_variables)]
             #[allow(unused_unsafe)]
-            #[allow(unused_assignments)]
-            #[allow(unused_mut)]
-            fn system(mut self) -> Box<dyn System> {
-                let id = SystemId::new();
-                let query_accesses = vec![
-                    $(vec![<$query::Fetch as Fetch>::access()],)*
-                    $($query_set::get_accesses(),)*
-                ];
-                let query_type_names = vec![
-                    $(std::any::type_name::<$query>(),)*
-                    $(std::any::type_name::<$query_set>(),)*
-                ];
-                let archetype_component_accesses = vec![TypeAccess::default(); query_accesses.len()];
-                Box::new(SystemFn {
-                    state: QuerySystemState {
-                        query_accesses,
-                        query_type_names,
-                        archetype_component_accesses,
-                        commands: Commands::default(),
+            #[allow(non_snake_case)]
+            fn system(mut self) -> InputFuncSystem<Input, Out> {
+                InputFuncSystem {
+                    state: SystemState {
+                        name: std::any::type_name::<Self>().into(),
+                        archetype_component_access: TypeAccess::default(),
+                        resource_access: TypeAccess::default(),
+                        local_resource_access: TypeAccess::default(),
+                        id: SystemId::new(),
+                        commands: Default::default(),
+                        arc_commands: Default::default(),
+                        current_query_index: Default::default(),
+                        query_archetype_component_accesses: Vec::new(),
+                        query_accesses: Vec::new(),
+                        query_type_names: Vec::new(),
                     },
-                    thread_local_execution: ThreadLocalExecution::NextFlush,
-                    id,
-                    name: core::any::type_name::<Self>().into(),
-                    func: move |world, resources, state| {
-                        {
-                            if let Some(($($resource,)*)) = resources.query_system::<($($resource,)*)>(id) {
-                                let mut i = 0;
-                                $(
-                                    let $query = Query::<$query>::new(
-                                        world,
-                                        &state.archetype_component_accesses[i]
-                                    );
-                                    i += 1;
-                                )*
-                                $(
-                                    let $query_set = QuerySet::<$query_set>::new(
-                                        world,
-                                        &state.archetype_component_accesses[i]
-                                    );
-                                    i += 1;
-                                )*
-
-                                let commands = &state.commands;
-                                fn_call!(self, ($($commands, commands)*), ($($resource),*), ($($query),*), ($($query_set),*))
+                    func: Box::new(move |input, state, world, resources| {
+                        state.reset_indices();
+                        // let mut input = Some(input);
+                        unsafe {
+                            if let Some(($($param,)*)) = <<($($param,)*) as SystemParam>::Fetch as FetchSystemParam>::get_param(state, world, resources) {
+                                Some(self(In(input), $($param),*))
+                            } else {
+                                None
                             }
                         }
-                    },
-                    thread_local_func: move |world, resources, state| {
-                        state.commands.apply(world, resources);
-                    },
-                    init_func: move |world, resources, state| {
-                        <($($resource,)*)>::initialize(resources, Some(id));
-                        state.commands.set_entity_reserver(world.get_entity_reserver())
-
-                    },
-                    resource_access: <<($($resource,)*) as ResourceQuery>::Fetch as FetchResource>::access(),
-                    archetype_component_access: TypeAccess::default(),
-                    update_func: |world, archetype_component_access, state| {
-                        archetype_component_access.clear();
-                        let mut conflict_index = None;
-                        let mut conflict_name = None;
-                        for (i, (query_accesses, component_access)) in state.query_accesses.iter().zip(state.archetype_component_accesses.iter_mut()).enumerate() {
-                            component_access.clear();
-                            for query_access in query_accesses.iter() {
-                                query_access.get_world_archetype_access(world, Some(component_access));
-                            }
-                            if !component_access.is_compatible(archetype_component_access) {
-                                conflict_index = Some(i);
-                                conflict_name = component_access.get_conflict(archetype_component_access).and_then(|archetype_component|
-                                    query_accesses
-                                        .iter()
-                                        .filter_map(|query_access| query_access.get_type_name(archetype_component.component))
-                                        .next());
-                                break;
-                            }
-                            archetype_component_access.union(component_access);
+                    }),
+                    thread_local_func: Box::new(|state, world, resources| {
+                        // SAFE: this is called with unique access to SystemState
+                        unsafe {
+                            (&mut *state.commands.get()).apply(world, resources);
                         }
-                        if let Some(conflict_index) = conflict_index {
-                            let mut conflicts_with_index = None;
-                            for prior_index in 0..conflict_index {
-                                if !state.archetype_component_accesses[conflict_index].is_compatible(&state.archetype_component_accesses[prior_index]) {
-                                    conflicts_with_index = Some(prior_index);
-                                }
-                            }
-                            panic!("System {} has conflicting queries. {} conflicts with the component access [{}] in this prior query: {}",
-                                core::any::type_name::<Self>(),
-                                state.query_type_names[conflict_index],
-                                conflict_name.unwrap_or("Unknown"),
-                                conflicts_with_index.map(|index| state.query_type_names[index]).unwrap_or("Unknown"));
+                        if let Some(ref commands) = state.arc_commands {
+                            let mut commands = commands.lock();
+                            commands.apply(world, resources);
                         }
-                    },
-                })
+                    }),
+                    init_func: Box::new(|state, world, resources| {
+                        <<($($param,)*) as SystemParam>::Fetch as FetchSystemParam>::init(state, world, resources)
+                    }),
+                }
             }
         }
     };
 }
 
-macro_rules! fn_call {
-    ($self:ident, ($($commands: ident, $commands_var: ident)*), ($($resource: ident),*), ($($a: ident),*), ($($b: ident),*)) => {
-        unsafe { $self($($commands_var.clone(),)* $($resource.unsafe_clone(),)* $($a,)* $($b,)*) }
-    };
-    ($self:ident, ($($commands: ident, $commands_var: ident)*), ($($resource: ident),*), ($($a: ident),*)) => {
-        unsafe { $self($($commands_var.clone(),)* $($resource.unsafe_clone(),)* $($a,)*) }
-    };
-    ($self:ident, (), ($($resource: ident),*), ($($a: ident),*)) => {
-        unsafe { $self($($resource.unsafe_clone(),)* $($a,)*) }
-    };
-}
-
-macro_rules! impl_into_query_systems {
-    (($($resource: ident,)*), ($($query: ident),*)) => {
-        #[rustfmt::skip]
-        impl_into_query_system!((), ($($resource),*), ($($query),*), ());
-        #[rustfmt::skip]
-        impl_into_query_system!((), ($($resource),*), ($($query),*), (QS1));
-        #[rustfmt::skip]
-        impl_into_query_system!((), ($($resource),*), ($($query),*), (QS1, QS2));
-
-        #[rustfmt::skip]
-        impl_into_query_system!((Commands), ($($resource),*), ($($query),*), ());
-        #[rustfmt::skip]
-        impl_into_query_system!((Commands), ($($resource),*), ($($query),*), (QS1));
-        #[rustfmt::skip]
-        impl_into_query_system!((Commands), ($($resource),*), ($($query),*), (QS1, QS2));
-    }
-}
-
-macro_rules! impl_into_foreach_systems {
-    (($($resource: ident,)*), ($($component: ident),*)) => {
-        #[rustfmt::skip]
-        impl_into_foreach_system!((), ($($resource),*), ($($component),*));
-        #[rustfmt::skip]
-        impl_into_foreach_system!((Commands), ($($resource),*), ($($component),*));
-    }
-}
-
-macro_rules! impl_into_systems {
-    ($($resource: ident),*) => {
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C,D));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C,D,E));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C,D,E,F));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C,D,E,F,G));
-        #[rustfmt::skip]
-        impl_into_foreach_systems!(($($resource,)*), (A,B,C,D,E,F,G,H));
-
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), ());
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A));
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A,B));
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A,B,C));
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A,B,C,D));
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A,B,C,D,E));
-        #[rustfmt::skip]
-        impl_into_query_systems!(($($resource,)*), (A,B,C,D,E,F));
-    };
-}
-
-#[rustfmt::skip]
-impl_into_systems!();
-#[rustfmt::skip]
-impl_into_systems!(Ra);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re,Rf);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re,Rf,Rg);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re,Rf,Rg,Rh);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re,Rf,Rg,Rh,Ri);
-#[rustfmt::skip]
-impl_into_systems!(Ra,Rb,Rc,Rd,Re,Rf,Rg,Rh,Ri,Rj);
-
-/// Converts `Self` into a thread local system
-pub trait IntoThreadLocalSystem {
-    fn thread_local_system(self) -> Box<dyn System>;
-}
-
-impl<F> IntoThreadLocalSystem for F
-where
-    F: ThreadLocalSystemFn,
-{
-    fn thread_local_system(mut self) -> Box<dyn System> {
-        Box::new(SystemFn {
-            state: (),
-            thread_local_func: move |world, resources, _| {
-                self.run(world, resources);
-            },
-            func: |_, _, _| {},
-            init_func: |_, _, _| {},
-            update_func: |_, _, _| {},
-            thread_local_execution: ThreadLocalExecution::Immediate,
-            name: core::any::type_name::<F>().into(),
-            id: SystemId::new(),
-            resource_access: TypeAccess::default(),
-            archetype_component_access: TypeAccess::default(),
-        })
-    }
-}
-
-/// A thread local system function
-pub trait ThreadLocalSystemFn: Send + Sync + 'static {
-    fn run(&mut self, world: &mut World, resource: &mut Resources);
-}
-
-impl<F> ThreadLocalSystemFn for F
-where
-    F: FnMut(&mut World, &mut Resources) + Send + Sync + 'static,
-{
-    fn run(&mut self, world: &mut World, resources: &mut Resources) {
-        self(world, resources);
-    }
-}
+impl_into_system!();
+impl_into_system!(A);
+impl_into_system!(A, B);
+impl_into_system!(A, B, C);
+impl_into_system!(A, B, C, D);
+impl_into_system!(A, B, C, D, E);
+impl_into_system!(A, B, C, D, E, F);
+impl_into_system!(A, B, C, D, E, F, G);
+impl_into_system!(A, B, C, D, E, F, G, H);
+impl_into_system!(A, B, C, D, E, F, G, H, I);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_into_system!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
 #[cfg(test)]
 mod tests {
-    use super::{IntoForEachSystem, IntoQuerySystem, Query};
+    use super::IntoSystem;
     use crate::{
-        resource::{ResMut, Resources},
+        clear_trackers_system,
+        resource::{Res, ResMut, Resources},
         schedule::Schedule,
-        ChangedRes, Mut, QuerySet,
+        ChangedRes, Entity, Local, Or, Query, QuerySet, System, SystemStage, With, World,
     };
-    use bevy_hecs::{Entity, With, World};
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, Default)]
     struct A;
     struct B;
     struct C;
@@ -430,7 +349,7 @@ mod tests {
     fn query_system_gets() {
         fn query_system(
             mut ran: ResMut<bool>,
-            entity_query: Query<With<A, Entity>>,
+            entity_query: Query<Entity, With<A>>,
             b_query: Query<&B>,
             a_c_query: Query<(&A, &C)>,
             d_query: Query<&D>,
@@ -480,11 +399,7 @@ mod tests {
         world.spawn((A, C));
         world.spawn((A, D));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", query_system.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, query_system.system());
 
         assert!(*resources.get::<bool>().unwrap(), "system ran");
     }
@@ -496,9 +411,9 @@ mod tests {
         fn query_system(
             mut ran: ResMut<bool>,
             set: QuerySet<(
-                Query<Or<(Changed<A>, Changed<B>)>>,
-                Query<Or<(Added<A>, Added<B>)>>,
-                Query<Or<(Mutated<A>, Mutated<B>)>>,
+                Query<(), Or<(Changed<A>, Changed<B>)>>,
+                Query<(), Or<(Added<A>, Added<B>)>>,
+                Query<(), Or<(Mutated<A>, Mutated<B>)>>,
             )>,
         ) {
             let changed = set.q0().iter().count();
@@ -510,26 +425,24 @@ mod tests {
             assert_eq!(mutated, 0);
 
             *ran = true;
-        }
+        };
 
         let mut world = World::default();
         let mut resources = Resources::default();
         resources.insert(false);
         world.spawn((A, B));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", query_system.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, query_system.system());
 
         assert!(*resources.get::<bool>().unwrap(), "system ran");
     }
 
     #[test]
     fn changed_resource_system() {
-        fn incr_e_on_flip(_run_on_flip: ChangedRes<bool>, mut i: Mut<i32>) {
-            *i += 1;
+        fn incr_e_on_flip(_run_on_flip: ChangedRes<bool>, mut query: Query<&mut i32>) {
+            for mut i in query.iter_mut() {
+                *i += 1;
+            }
         }
 
         let mut world = World::default();
@@ -538,18 +451,67 @@ mod tests {
         let ent = world.spawn((0,));
 
         let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", incr_e_on_flip.system());
+        let mut update = SystemStage::parallel();
+        update.add_system(incr_e_on_flip.system());
+        schedule.add_stage("update", update);
+        schedule.add_stage(
+            "clear_trackers",
+            SystemStage::single(clear_trackers_system.system()),
+        );
 
-        schedule.run(&mut world, &mut resources);
+        schedule.initialize_and_run(&mut world, &mut resources);
         assert_eq!(*(world.get::<i32>(ent).unwrap()), 1);
 
-        schedule.run(&mut world, &mut resources);
+        schedule.initialize_and_run(&mut world, &mut resources);
         assert_eq!(*(world.get::<i32>(ent).unwrap()), 1);
 
         *resources.get_mut::<bool>().unwrap() = true;
-        schedule.run(&mut world, &mut resources);
+        schedule.initialize_and_run(&mut world, &mut resources);
         assert_eq!(*(world.get::<i32>(ent).unwrap()), 2);
+    }
+
+    #[test]
+    fn changed_resource_or_system() {
+        fn incr_e_on_flip(
+            _or: Or<(Option<ChangedRes<bool>>, Option<ChangedRes<i32>>)>,
+            mut query: Query<&mut i32>,
+        ) {
+            for mut i in query.iter_mut() {
+                *i += 1;
+            }
+        }
+
+        let mut world = World::default();
+        let mut resources = Resources::default();
+        resources.insert(false);
+        resources.insert::<i32>(10);
+        let ent = world.spawn((0,));
+
+        let mut schedule = Schedule::default();
+        let mut update = SystemStage::parallel();
+        update.add_system(incr_e_on_flip.system());
+        schedule.add_stage("update", update);
+        schedule.add_stage(
+            "clear_trackers",
+            SystemStage::single(clear_trackers_system.system()),
+        );
+
+        schedule.initialize_and_run(&mut world, &mut resources);
+        assert_eq!(*(world.get::<i32>(ent).unwrap()), 1);
+
+        schedule.initialize_and_run(&mut world, &mut resources);
+        assert_eq!(*(world.get::<i32>(ent).unwrap()), 1);
+
+        *resources.get_mut::<bool>().unwrap() = true;
+        schedule.initialize_and_run(&mut world, &mut resources);
+        assert_eq!(*(world.get::<i32>(ent).unwrap()), 2);
+
+        schedule.initialize_and_run(&mut world, &mut resources);
+        assert_eq!(*(world.get::<i32>(ent).unwrap()), 2);
+
+        *resources.get_mut::<i32>().unwrap() = 20;
+        schedule.initialize_and_run(&mut world, &mut resources);
+        assert_eq!(*(world.get::<i32>(ent).unwrap()), 3);
     }
 
     #[test]
@@ -561,11 +523,7 @@ mod tests {
         let mut resources = Resources::default();
         world.spawn((A,));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", sys.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, sys.system());
     }
 
     #[test]
@@ -577,11 +535,7 @@ mod tests {
         let mut resources = Resources::default();
         world.spawn((A,));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", sys.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, sys.system());
     }
 
     #[test]
@@ -592,11 +546,7 @@ mod tests {
         let mut resources = Resources::default();
         world.spawn((A,));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", sys.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, sys.system());
     }
 
     #[test]
@@ -608,11 +558,7 @@ mod tests {
         let mut resources = Resources::default();
         world.spawn((A,));
 
-        let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", sys.system());
-
-        schedule.run(&mut world, &mut resources);
+        run_system(&mut world, &mut resources, sys.system());
     }
 
     #[test]
@@ -623,11 +569,74 @@ mod tests {
         let mut world = World::default();
         let mut resources = Resources::default();
         world.spawn((A,));
+        run_system(&mut world, &mut resources, sys.system());
+    }
 
+    fn run_system<S: System<In = (), Out = ()>>(
+        world: &mut World,
+        resources: &mut Resources,
+        system: S,
+    ) {
         let mut schedule = Schedule::default();
-        schedule.add_stage("update");
-        schedule.add_system_to_stage("update", sys.system());
+        let mut update = SystemStage::parallel();
+        update.add_system(system);
+        schedule.add_stage("update", update);
+        schedule.initialize_and_run(world, resources);
+    }
 
-        schedule.run(&mut world, &mut resources);
+    #[derive(Default)]
+    struct BufferRes {
+        _buffer: Vec<u8>,
+    }
+
+    fn test_for_conflicting_resources<S: System<In = (), Out = ()>>(sys: S) {
+        let mut world = World::default();
+        let mut resources = Resources::default();
+        resources.insert(BufferRes::default());
+        resources.insert(A);
+        resources.insert(B);
+        run_system(&mut world, &mut resources, sys.system());
+    }
+
+    #[test]
+    #[should_panic]
+    fn conflicting_system_resources() {
+        fn sys(_: ResMut<BufferRes>, _: Res<BufferRes>) {}
+        test_for_conflicting_resources(sys.system())
+    }
+
+    #[test]
+    #[should_panic]
+    fn conflicting_system_resources_reverse_order() {
+        fn sys(_: Res<BufferRes>, _: ResMut<BufferRes>) {}
+        test_for_conflicting_resources(sys.system())
+    }
+
+    #[test]
+    #[should_panic]
+    fn conflicting_system_resources_multiple_mutable() {
+        fn sys(_: ResMut<BufferRes>, _: ResMut<BufferRes>) {}
+        test_for_conflicting_resources(sys.system())
+    }
+
+    #[test]
+    #[should_panic]
+    fn conflicting_changed_and_mutable_resource() {
+        // A tempting pattern, but unsound if allowed.
+        fn sys(_: ResMut<BufferRes>, _: ChangedRes<BufferRes>) {}
+        test_for_conflicting_resources(sys.system())
+    }
+
+    #[test]
+    #[should_panic]
+    fn conflicting_system_local_resources() {
+        fn sys(_: Local<BufferRes>, _: Local<BufferRes>) {}
+        test_for_conflicting_resources(sys.system())
+    }
+
+    #[test]
+    fn nonconflicting_system_resources() {
+        fn sys(_: Local<BufferRes>, _: ResMut<BufferRes>, _: Local<A>, _: ResMut<A>) {}
+        test_for_conflicting_resources(sys.system())
     }
 }
